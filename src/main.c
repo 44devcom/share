@@ -94,7 +94,12 @@ bool check_authentication(const char *header, const char *expected_b64) {
 void handle_client_http(int client_socket, const char *expected_auth) {
     char buffer[BUFFER_SIZE];
     const char *unauth = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Secure\"\r\n\r\n";
-    const char *ok = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n";
+    char ok[BUFFER_SIZE];
+    snprintf(ok, sizeof(ok),
+         "HTTP/1.1 200 OK\r\n"
+         "Content-Type: application/octet-stream\r\n"
+         "Content-Disposition: attachment; filename=\"%s\"\r\n\r\n",
+         config.file_path ? config.file_path : "default");
 
     ssize_t bytes_read = recv(client_socket, buffer, BUFFER_SIZE - 1, 0);
     if (bytes_read <= 0) return;
@@ -118,8 +123,12 @@ void handle_client_http(int client_socket, const char *expected_auth) {
 void handle_client_ssl(SSL *ssl, const char *expected_auth) {
     char buffer[BUFFER_SIZE];
     const char *unauth = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Secure\"\r\n\r\n";
-    const char *ok = "HTTP/1.1 200 OK\r\n"Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="config.file_path"
-\r\n";
+    char ok[BUFFER_SIZE];
+    snprintf(ok, sizeof(ok),
+         "HTTP/1.1 200 OK\r\n"
+         "Content-Type: application/octet-stream\r\n"
+         "Content-Disposition: attachment; filename=\"%s\"\r\n\r\n",
+         config.file_path ? config.file_path : "default");
 
     int bytes_read = SSL_read(ssl, buffer, BUFFER_SIZE - 1);
     if (bytes_read <= 0) return;
