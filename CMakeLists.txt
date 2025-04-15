@@ -1,6 +1,13 @@
-cmake_minimum_required(VERSION 3.30)
-project(bin/share C)
+cmake_minimum_required(VERSION 3.10)
+project(FileServer)
 
-set(CMAKE_C_STANDARD 23)
+# Set C source files
+set(SOURCE_FILES src/main.c)
 
-add_executable(share main.c)
+# Create executable
+add_executable(share ${SOURCE_FILES})
+
+# Set output directory
+set_target_properties(share PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
