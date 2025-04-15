@@ -26,7 +26,7 @@ gcc src/main.c -o bin/share -lssl -lcrypto
 ## 🔐 Generate Self-Signed Certificate
 
 ```sh
-sh generate_certs.sh
+sh ssl/create.sh
 ```
 
 ## 📦 Options
