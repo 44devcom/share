@@ -19,6 +19,7 @@
 #include <getopt.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <signal.h>
 
 #define BUFFER_SIZE 1024
 
@@ -30,6 +31,7 @@ typedef struct {
     bool use_ssl;
     char cert_path[256];
     char key_path[256];
+    bool use_auth; // New field for authentication
 } ServerConfig;
 
 ServerConfig config = {
@@ -37,7 +39,8 @@ ServerConfig config = {
     .user = "admin",
     .pass = "password",
     .file_path = "shared_file.txt",
-    .use_ssl = false
+    .use_ssl = false,
+    .use_auth = false // Default to false
 };
 
 // Helper: show usage help
@@ -51,6 +54,7 @@ void show_help(const char *progname) {
         "  --file <path>       Path to the file to serve\n"
         "  --cert <cert.pem>   Path to SSL certificate (enable HTTPS)\n"
         "  --key <key.pem>     Path to SSL private key (enable HTTPS)\n"
+        "  --auth              Enable basic authentication (default: false)\n"
         "  --help              Show this help and exit\n",
         progname
     );
@@ -105,10 +109,12 @@ void handle_client_http(int client_socket, const char *expected_auth) {
     if (bytes_read <= 0) return;
     buffer[bytes_read] = '\0';
 
-    char *auth_header = strstr(buffer, "Authorization: ");
-    if (!check_authentication(auth_header, expected_auth)) {
-        send(client_socket, unauth, strlen(unauth), 0);
-        return;
+    if (config.use_auth) {
+        char *auth_header = strstr(buffer, "Authorization: ");
+        if (!check_authentication(auth_header, expected_auth)) {
+            send(client_socket, unauth, strlen(unauth), 0);
+            return;
+        }
     }
 
     send(client_socket, ok, strlen(ok), 0);
@@ -134,10 +140,12 @@ void handle_client_ssl(SSL *ssl, const char *expected_auth) {
     if (bytes_read <= 0) return;
     buffer[bytes_read] = '\0';
 
-    char *auth_header = strstr(buffer, "Authorization: ");
-    if (!check_authentication(auth_header, expected_auth)) {
-        SSL_write(ssl, unauth, strlen(unauth));
-        return;
+    if (config.use_auth) {
+        char *auth_header = strstr(buffer, "Authorization: ");
+        if (!check_authentication(auth_header, expected_auth)) {
+            SSL_write(ssl, unauth, strlen(unauth));
+            return;
+        }
     }
 
     SSL_write(ssl, ok, strlen(ok));
@@ -157,6 +165,7 @@ void parse_args(int argc, char *argv[]) {
         {"file", required_argument, 0, 0},
         {"cert", required_argument, 0, 0},
         {"key", required_argument, 0, 0},
+        {"auth", no_argument, 0, 0}, // New option for authentication
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -173,6 +182,7 @@ void parse_args(int argc, char *argv[]) {
                 else if (!strcmp(options[idx].name, "file")) strncpy(config.file_path, optarg, 255);
                 else if (!strcmp(options[idx].name, "cert")) { config.use_ssl = true; strncpy(config.cert_path, optarg, 255); }
                 else if (!strcmp(options[idx].name, "key")) strncpy(config.key_path, optarg, 255);
+                else if (!strcmp(options[idx].name, "auth")) config.use_auth = true; // Enable authentication
                 break;
             case 'h':
             default:
@@ -182,13 +192,18 @@ void parse_args(int argc, char *argv[]) {
     }
 }
 
+void handle_sigpipe(int sig) {
+    // Ignore SIGPIPE
+}
+
 int main(int argc, char *argv[]) {
-    // If no parameters are passed, show help
+    signal(SIGPIPE, handle_sigpipe); // Ignore SIGPIPE
+
     if (argc == 1) {
         show_help(argv[0]);
         exit(0);
     }
-    
+
     parse_args(argc, argv);
 
     char credentials[128];
@@ -201,25 +216,65 @@ int main(int argc, char *argv[]) {
         OpenSSL_add_all_algorithms();
         SSL_load_error_strings();
         ctx = SSL_CTX_new(TLS_server_method());
-        SSL_CTX_use_certificate_file(ctx, config.cert_path, SSL_FILETYPE_PEM);
-        SSL_CTX_use_PrivateKey_file(ctx, config.key_path, SSL_FILETYPE_PEM);
+        if (!SSL_CTX_use_certificate_file(ctx, config.cert_path, SSL_FILETYPE_PEM) ||
+            !SSL_CTX_use_PrivateKey_file(ctx, config.key_path, SSL_FILETYPE_PEM)) {
+            fprintf(stderr, "Failed to load SSL certificate or key\n");
+            free(expected_auth);
+            exit(1);
+        }
     }
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        free(expected_auth);
+        if (ctx) SSL_CTX_free(ctx);
+        exit(1);
+    }
+
     struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(config.port), .sin_addr.s_addr = INADDR_ANY };
-    bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
-    listen(sockfd, 5);
+    if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sockfd);
+        free(expected_auth);
+        if (ctx) SSL_CTX_free(ctx);
+        exit(1);
+    }
+
+    if (listen(sockfd, 5) < 0) {
+        perror("listen");
+        close(sockfd);
+        free(expected_auth);
+        if (ctx) SSL_CTX_free(ctx);
+        exit(1);
+    }
 
     printf("Server running on port %d %s\n", config.port, config.use_ssl ? "(HTTPS)" : "(HTTP)");
 
     while (1) {
         int client = accept(sockfd, NULL, NULL);
+        if (client < 0) {
+            perror("accept");
+            continue;
+        }
+
         if (config.use_ssl) {
             SSL *ssl = SSL_new(ctx);
+            if (!ssl) {
+                fprintf(stderr, "Failed to create SSL object\n");
+                close(client);
+                continue;
+            }
             SSL_set_fd(ssl, client);
-            if (SSL_accept(ssl) <= 0) ERR_print_errors_fp(stderr);
-            else handle_client_ssl(ssl, expected_auth);
-            SSL_shutdown(ssl); SSL_free(ssl);
+            if (SSL_accept(ssl) <= 0) {
+                ERR_print_errors_fp(stderr);
+                SSL_free(ssl);
+                close(client);
+                continue;
+            }
+            handle_client_ssl(ssl, expected_auth);
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
         } else {
             handle_client_http(client, expected_auth);
         }
@@ -228,5 +283,6 @@ int main(int argc, char *argv[]) {
 
     if (ctx) SSL_CTX_free(ctx);
     free(expected_auth);
+    close(sockfd);
     return 0;
 }
